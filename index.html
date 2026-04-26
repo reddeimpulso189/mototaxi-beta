@@ -323,7 +323,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:system-u
 <script type="module">
 import{initializeApp}from'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'
 import{getAuth,signInWithEmailAndPassword,createUserWithEmailAndPassword,signOut,onAuthStateChanged}from'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'
-import{getFirestore,doc,setDoc,getDoc,updateDoc,addDoc,collection,onSnapshot,query,where,orderBy,serverTimestamp,limit}from'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'
+import{getFirestore,doc,setDoc,getDoc,updateDoc,addDoc,collection,onSnapshot,getDocs,query,where,orderBy,serverTimestamp,limit}from'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'
 
 const fbApp=initializeApp({apiKey:"AIzaSyAcLh0yPZm877WEWz5U2L42PldWYiM6Qjo",authDomain:"mototaxi-impulso.firebaseapp.com",projectId:"mototaxi-impulso",storageBucket:"mototaxi-impulso.firebasestorage.app",messagingSenderId:"98378533263",appId:"1:98378533263:web:fd8675c852051a359663fa"})
 const auth=getAuth(fbApp),db=getFirestore(fbApp)
@@ -521,6 +521,9 @@ window.requestTrip=async function(){
     tripId=ref.id
     await updateDoc(doc(db,'users',me.uid),{activeTrip:ref.id})
     // Mostrar panel buscando ANTES de escuchar
+    // Cambiar UI inmediatamente
+    btn.textContent='Solicitar 🏍️'
+    btn.disabled=false
     showSheet('sheet-searching')
     G('emerg-btn').style.display='flex'
     listenTrip(ref.id)
@@ -645,17 +648,35 @@ function startWatch(){
 }
 
 function listenAvail(){
-  if(availUnsub)availUnsub()
-  availUnsub=onSnapshot(
-    query(collection(db,'trips'),where('status','==','searching'),limit(10)),
-    snap=>{
-      if(!driverOnline)return
-      if(profile.activeTrip)return
-      if(reqId)return // ya hay una solicitud activa mostrándose
-      const trips=snap.docs.filter(d=>!d.data().driverQueue?.includes(me.uid))
-      if(trips.length>0) showReq(trips[0].id, trips[0].data())
-    }
-  )
+  // Cancelar listener anterior
+  if(availUnsub){ availUnsub(); availUnsub=null }
+  
+  // Polling cada 3 segundos - más confiable que onSnapshot para este caso
+  const pollTrips = async () => {
+    if(!driverOnline) return
+    if(profile.activeTrip) return
+    if(reqId) return
+    try{
+      const snap = await getDocs(query(collection(db,'trips'),where('status','==','searching'),limit(10)))
+      if(!driverOnline||profile.activeTrip||reqId) return
+      for(const d of snap.docs){
+        const t=d.data()
+        if(t.driverQueue?.includes(me.uid)) continue
+        showReq(d.id,t)
+        break
+      }
+    }catch(e){ console.log('poll error',e) }
+  }
+  
+  // Ejecutar inmediatamente y luego cada 3 segundos
+  pollTrips()
+  const interval = setInterval(()=>{
+    if(!driverOnline){ clearInterval(interval); return }
+    pollTrips()
+  }, 3000)
+  
+  // Guardar referencia para poder cancelar
+  availUnsub = () => clearInterval(interval)
 }
 
 function showReq(id,trip){
