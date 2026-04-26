@@ -758,6 +758,7 @@ window.advanceTrip=async function(){
     await updateDoc(doc(db,'drivers',me.uid),{activeTrip:null,currentPassengers:0})
     profile.activeTrip=null;tripId=null
     localStorage.removeItem('activeTripId')
+    reqId=null
     G('d-active').style.display='none';G('d-idle').style.display='flex'
     toast('🎉 ¡Viaje completado! $'+t.price+' MXN')
     if(tripUnsub){tripUnsub();tripUnsub=null}
