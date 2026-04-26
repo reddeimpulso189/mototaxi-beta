@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="theme-color" content="#070708"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="MotoImpulso"/>
+<title>Mototaxi Impulso</title>
+
+<!-- Leaflet Maps (GRATIS, sin tarjeta) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged }
+  from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'
+import { getFirestore, doc, setDoc, getDoc, updateDoc, addDoc, collection,
+  onSnapshot, query, where, orderBy, serverTimestamp, getDocs, limit }
+  from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'
+
+// ── FIREBASE CONFIG (tus credenciales reales) ─────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyAcLh0yPZm877WEWz5U2L42PldWYiM6Qjo",
+  authDomain: "mototaxi-impulso.firebaseapp.com",
+  projectId: "mototaxi-impulso",
+  storageBucket: "mototaxi-impulso.firebasestorage.app",
+  messagingSenderId: "98378533263",
+  appId: "1:98378533263:web:fd8675c852051a359663fa"
+}
+
+const app  = initializeApp(firebaseConfig)
+const auth = getAuth(app)
+const db   = getFirestore(app)
+
+// ── ESTADO GLOBAL ─────────────────────────────────────────
+let currentUser = null
+let currentProfile = null
+let currentRole = null
+let map = null
+let userMarker = null
+let driverMarker = null
+let routeLine = null
+let watchId = null
+let currentTripId = null
+let tripUnsub = null
+let driversUnsub = null
+let availTripsUnsub = null
+let locationInterval = null
+let selectedOrigin = null
+let selectedDest = null
+let passengers = 1
+let tripType = 'exclusive'
+
+// ── AUTH OBSERVER ─────────────────────────────────────────
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    currentUser = user
+    // Buscar en users
+    const uSnap = await getDoc(doc(db, 'users', user.uid))
+    if (uSnap.exists()) {
+      currentProfile = uSnap.data()
+      currentRole = 'user'
+      showScreen('user-map')
+      initUserMap()
+      return
+    }
+    // Buscar en drivers
+    const dSnap = await getDoc(doc(db, 'drivers', user.uid))
+    if (dSnap.exists()) {
+      currentProfile = dSnap.data()
+      currentRole = 'driver'
+      showScreen('driver')
+      initDriverMap()
+      return
+    }
+    // Admin hardcoded por uid
+    currentProfile = { uid: user.uid, name: user.email, role: 'admin' }
+    currentRole = 'admin'
+    showScreen('admin')
+    initAdmin()
+  } else {
+    currentUser = null
+    currentProfile = null
+    currentRole = null
+    showScreen('login')
+  }
+  hideLoader()
+})
+
+// ── HELPERS ───────────────────────────────────────────────
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.style.display = 'none')
+  const el = document.getElementById(id)
+  if (el) el.style.display = 'flex'
+  hideLoader()
+}
+
+function hideLoader() {
+  document.getElementById('splash').style.display = 'none'
+}
+
+function toast(msg, duration = 3000) {
+  const t = document.getElementById('toast')
+  t.textContent = msg
+  t.classList.add('show')
+  clearTimeout(t._timer)
+  t._timer = setTimeout(() => t.classList.remove('show'), duration)
+}
+
+function setLoading(id, loading) {
+  const btn = document.getElementById(id)
+  if (!btn) return
+  btn.disabled = loading
+  btn.dataset.original = btn.dataset.original || btn.textContent
+  btn.textContent = loading ? 'Cargando...' : btn.dataset.original
+}
+
+function calcPrice(distM, pax) {
+  return Math.round(8 + Math.ceil(distM / 100) + Math.max(0, pax - 1) * 8)
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371, dLat = (lat2-lat1)*Math.PI/180, dLng = (lng2-lng1)*Math.PI/180
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+}
+
+// ── LOGIN ─────────────────────────────────────────────────
+window.doLogin = async function() {
+  const email = document.getElementById('l-email').value.trim()
+  const pass  = document.getElementById('l-pass').value
+  if (!email || !pass) { toast('⚠️ Llena todos los campos'); return }
+  setLoading('login-btn', true)
+  try {
+    await signInWithEmailAndPassword(auth, email, pass)
+  } catch (e) {
+    toast('❌ ' + (e.code === 'auth/invalid-credential' ? 'Correo o contraseña incorrectos' : e.message))
+    setLoading('login-btn', false)
+  }
+}
+
+window.doRegisterUser = async function() {
+  const name  = document.getElementById('r-name').value.trim()
+  const phone = document.getElementById('r-phone').value.trim()
+  const email = document.getElementById('r-email').value.trim()
+  const pass  = document.getElementById('r-pass').value
+  if (!name || !phone || !email || !pass) { toast('⚠️ Llena todos los campos'); return }
+  setLoading('reg-btn', true)
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass)
+    await setDoc(doc(db, 'users', cred.user.uid), {
+      uid: cred.user.uid, name, phone, email, role: 'user',
+      status: 'active', createdAt: serverTimestamp(), activeTrip: null
+    })
+  } catch (e) {
+    toast('❌ ' + (e.code === 'auth/email-already-in-use' ? 'Ese correo ya existe' : e.message))
+    setLoading('reg-btn', false)
+  }
+}
+
+window.doRegisterDriver = async function() {
+  const name  = document.getElementById('d-name').value.trim()
+  const phone = document.getElementById('d-phone').value.trim()
+  const email = document.getElementById('d-email').value.trim()
+  const pass  = document.getElementById('d-pass').value
+  if (!name || !phone || !email || !pass) { toast('⚠️ Llena todos los campos'); return }
+  setLoading('dreg-btn', true)
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass)
+    await setDoc(doc(db, 'drivers', cred.user.uid), {
+      uid: cred.user.uid, name, phone, email, role: 'driver',
+      status: 'active', // beta: auto-aprobado
+      isOnline: false, location: null,
+      subscription: { active: true, endDate: new Date(Date.now() + 30*24*3600*1000) },
+      activeTrip: null, currentPassengers: 0, totalTrips: 0, avgRating: 5.0,
+      createdAt: serverTimestamp()
+    })
+  } catch (e) {
+    toast('❌ ' + e.message)
+    setLoading('dreg-btn', false)
+  }
+}
+
+window.doLogout = async function() {
+  if (watchId) navigator.geolocation.clearWatch(watchId)
+  if (tripUnsub) tripUnsub()
+  if (driversUnsub) driversUnsub()
+  if (availTripsUnsub) availTripsUnsub()
+  clearInterval(locationInterval)
+  if (currentProfile?.role === 'driver' && currentUser) {
+    await updateDoc(doc(db, 'drivers', currentUser.uid), { isOnline: false }).catch(()=>{})
+  }
+  await signOut(auth)
+}
+
+window.showTab = function(tab) {
+  document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'))
+  document.querySelectorAll('.login-section').forEach(s => s.style.display = 'none')
+  document.getElementById('tab-' + tab).classList.add('active')
+  document.getElementById('section-' + tab).style.display = 'flex'
+}
+
+// ── USER MAP ──────────────────────────────────────────────
+function initUserMap() {
+  document.getElementById('u-name').textContent = currentProfile.name?.split(' ')[0] || 'Usuario'
+  showUserPanel('idle')
+
+  setTimeout(() => {
+    if (map) { map.remove(); map = null }
+    map = L.map('user-map-div', { zoomControl: false, attributionControl: false })
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19
+    }).addTo(map)
+
+    // Intentar geolocalizar
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(pos => {
+        const ll = [pos.coords.latitude, pos.coords.longitude]
+        map.setView(ll, 16)
+        userMarker = L.circleMarker(ll, {
+          radius: 8, fillColor: '#fff', fillOpacity: 1,
+          color: '#1a6fff', weight: 3
+        }).addTo(map).bindPopup('Tu ubicación').openPopup()
+        selectedOrigin = { lat: ll[0], lng: ll[1], address: 'Mi ubicación actual' }
+        document.getElementById('u-origin-txt').textContent = 'Mi ubicación actual'
+      }, () => {
+        map.setView([19.2934, -99.0085], 15) // Tláhuac CDMX default
+      })
+    } else {
+      map.setView([19.2934, -99.0085], 15)
+    }
+
+    // Click en mapa para seleccionar destino
+    map.on('click', async (e) => {
+      if (!selectedOrigin) {
+        selectedOrigin = { lat: e.latlng.lat, lng: e.latlng.lng, address: 'Origen seleccionado' }
+        document.getElementById('u-origin-txt').textContent = 'Origen seleccionado'
+        L.circleMarker([e.latlng.lat, e.latlng.lng], {
+          radius: 8, fillColor: '#fff', fillOpacity: 1, color: '#1a6fff', weight: 3
+        }).addTo(map)
+        toast('📍 Origen marcado. Ahora toca el destino')
+      } else if (!selectedDest) {
+        selectedDest = { lat: e.latlng.lat, lng: e.latlng.lng, address: 'Destino seleccionado' }
+        document.getElementById('u-dest-txt').textContent = 'Destino seleccionado'
+        L.circleMarker([e.latlng.lat, e.latlng.lng], {
+          radius: 8, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
+        }).addTo(map)
+        // Dibujar línea
+        if (routeLine) map.removeLayer(routeLine)
+        routeLine = L.polyline([
+          [selectedOrigin.lat, selectedOrigin.lng],
+          [selectedDest.lat, selectedDest.lng]
+        ], { color: '#1a6fff', weight: 4, opacity: .8, dashArray: '8,4' }).addTo(map)
+        const dist = haversineKm(selectedOrigin.lat, selectedOrigin.lng, selectedDest.lat, selectedDest.lng) * 1000
+        const price = calcPrice(dist, passengers)
+        document.getElementById('u-price').textContent = '$' + price
+        document.getElementById('u-dist').textContent = (dist/1000).toFixed(1) + ' km'
+        showUserPanel('confirm')
+      }
+    })
+  }, 300)
+}
+
+function showUserPanel(phase) {
+  document.querySelectorAll('.u-panel').forEach(p => p.style.display = 'none')
+  const el = document.getElementById('u-panel-' + phase)
+  if (el) el.style.display = 'flex'
+}
+
+window.resetUserTrip = function() {
+  selectedOrigin = null
+  selectedDest = null
+  passengers = 1
+  tripType = 'exclusive'
+  if (routeLine && map) map.removeLayer(routeLine)
+  if (map) map.eachLayer(l => { if (l instanceof L.CircleMarker) map.removeLayer(l) })
+  if (driverMarker && map) { map.removeLayer(driverMarker); driverMarker = null }
+  if (tripUnsub) { tripUnsub(); tripUnsub = null }
+  currentTripId = null
+  document.getElementById('u-origin-txt').textContent = 'Toca para seleccionar'
+  document.getElementById('u-dest-txt').textContent = 'Toca el mapa para marcar'
+  document.getElementById('u-emerg-btn').style.display = 'none'
+  showUserPanel('idle')
+  // Re-init map click
+  initUserMap()
+}
+
+window.setPax = function(d) {
+  passengers = Math.max(1, Math.min(4, passengers + d))
+  document.getElementById('u-pax').textContent = passengers
+  if (selectedOrigin && selectedDest) {
+    const dist = haversineKm(selectedOrigin.lat, selectedOrigin.lng, selectedDest.lat, selectedDest.lng) * 1000
+    document.getElementById('u-price').textContent = '$' + calcPrice(dist, passengers)
+  }
+}
+
+window.setTripType = function(t, el) {
+  tripType = t
+  document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'))
+  el.classList.add('active')
+}
+
+window.requestTrip = async function() {
+  if (!selectedOrigin || !selectedDest) { toast('⚠️ Selecciona origen y destino'); return }
+  setLoading('req-trip-btn', true)
+  try {
+    const dist = haversineKm(selectedOrigin.lat, selectedOrigin.lng, selectedDest.lat, selectedDest.lng) * 1000
+    const price = calcPrice(dist, passengers)
+    const ref = await addDoc(collection(db, 'trips'), {
+      userId: currentUser.uid, userName: currentProfile.name,
+      driverId: null, status: 'searching', type: tripType, passengers,
+      origin: selectedOrigin, destination: selectedDest,
+      price, distanceM: Math.round(dist), durationMin: Math.round(dist / 500),
+      paymentMethod: 'cash', createdAt: serverTimestamp(),
+      acceptedAt: null, completedAt: null, cancelledAt: null, driverQueue: []
+    })
+    currentTripId = ref.id
+    await updateDoc(doc(db, 'users', currentUser.uid), { activeTrip: ref.id })
+    showUserPanel('searching')
+    document.getElementById('u-emerg-btn').style.display = 'flex'
+    listenTrip(ref.id, price)
+  } catch (e) {
+    toast('❌ Error: ' + e.message)
+    setLoading('req-trip-btn', false)
+  }
+}
+
+function listenTrip(tripId, price) {
+  if (tripUnsub) tripUnsub()
+  tripUnsub = onSnapshot(doc(db, 'trips', tripId), async (snap) => {
+    if (!snap.exists()) return
+    const trip = snap.data()
+
+    if (trip.status === 'accepted' || trip.status === 'in_progress' || trip.status === 'arrived') {
+      showUserPanel('active')
+      document.getElementById('u-trip-status').textContent =
+        trip.status === 'accepted' ? '🏍️ Conductor en camino' :
+        trip.status === 'arrived'  ? '✅ Conductor llegó' : '🚗 En camino al destino'
+      document.getElementById('u-trip-price').textContent = '$' + trip.price + ' MXN'
+      if (trip.driverId) {
+        const dSnap = await getDoc(doc(db, 'drivers', trip.driverId))
+        if (dSnap.exists()) {
+          const d = dSnap.data()
+          document.getElementById('u-driver-name').textContent = d.name
+          document.getElementById('u-driver-rating').textContent = '⭐ ' + (d.avgRating || 5).toFixed(1)
+          // Escuchar ubicación del conductor
+          onSnapshot(doc(db, 'drivers', trip.driverId), driverSnap => {
+            const dd = driverSnap.data()
+            if (dd?.location && map) {
+              const ll = [dd.location.lat, dd.location.lng]
+              if (driverMarker) {
+                driverMarker.setLatLng(ll)
+              } else {
+                driverMarker = L.marker(ll, {
+                  icon: L.divIcon({
+                    html: '<div style="font-size:24px;filter:drop-shadow(0 0 6px #1a6fff)">🏍️</div>',
+                    iconSize: [30,30], className: ''
+                  })
+                }).addTo(map)
+              }
+            }
+          })
+        }
+      }
+    }
+
+    if (trip.status === 'completed') {
+      if (tripUnsub) { tripUnsub(); tripUnsub = null }
+      showUserPanel('rating')
+      document.getElementById('u-trip-final-price').textContent = trip.price
+      document.getElementById('u-emerg-btn').style.display = 'none'
+      toast('✅ ¡Viaje completado!')
+    }
+
+    if (trip.status === 'cancelled') {
+      toast('❌ Viaje cancelado: ' + (trip.cancelReason || ''))
+      resetUserTrip()
+    }
+  })
+}
+
+window.sendEmergency = async function() {
+  if (!confirm('¿Confirmas enviar alerta de emergencia?')) return
+  try {
+    const pos = await new Promise((res, rej) =>
+      navigator.geolocation.getCurrentPosition(p => res(p.coords), rej, { timeout: 5000 }))
+    await addDoc(collection(db, 'alerts'), {
+      type: 'emergency', userId: currentUser.uid, userName: currentProfile.name,
+      driverId: null, tripId: currentTripId,
+      location: { lat: pos.latitude, lng: pos.longitude },
+      status: 'active', createdAt: serverTimestamp(), notes: 'Emergencia desde app'
+    })
+    toast('🚨 Alerta enviada al administrador')
+  } catch {
+    await addDoc(collection(db, 'alerts'), {
+      type: 'emergency', userId: currentUser.uid, userName: currentProfile.name,
+      tripId: currentTripId, location: null, status: 'active', createdAt: serverTimestamp()
+    })
+    toast('🚨 Alerta enviada')
+  }
+}
+
+window.submitRating = async function() {
+  const score = parseInt(document.getElementById('u-star-val').value) || 5
+  const comment = document.getElementById('u-comment').value
+  try {
+    const tripSnap = await getDoc(doc(db, 'trips', currentTripId))
+    const trip = tripSnap.data()
+    if (trip?.driverId) {
+      await addDoc(collection(db, 'ratings'), {
+        tripId: currentTripId, fromUserId: currentUser.uid,
+        toDriverId: trip.driverId, score, comment, createdAt: serverTimestamp()
+      })
+    }
+  } catch {}
+  toast('⭐ ¡Gracias por calificar!')
+  await updateDoc(doc(db, 'users', currentUser.uid), { activeTrip: null })
+  resetUserTrip()
+}
+
+// ── DRIVER ────────────────────────────────────────────────
+function initDriverMap() {
+  document.getElementById('d-name-display').textContent = currentProfile.name?.split(' ')[0] || 'Conductor'
+  document.getElementById('d-status-badge').textContent = currentProfile.isOnline ? '🟢 En línea' : '⚫ Offline'
+
+  setTimeout(() => {
+    if (map) { map.remove(); map = null }
+    map = L.map('driver-map-div', { zoomControl: false, attributionControl: false })
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map)
+    map.setView([19.2934, -99.0085], 15)
+
+    navigator.geolocation.getCurrentPosition(pos => {
+      map.setView([pos.coords.latitude, pos.coords.longitude], 16)
+      userMarker = L.marker([pos.coords.latitude, pos.coords.longitude], {
+        icon: L.divIcon({ html: '<div style="font-size:26px">🏍️</div>', iconSize: [30,30], className: '' })
+      }).addTo(map)
+    }, () => {})
+  }, 300)
+
+  // Si ya tiene viaje activo
+  if (currentProfile.activeTrip) {
+    currentTripId = currentProfile.activeTrip
+    listenDriverTrip(currentProfile.activeTrip)
+  }
+}
+
+window.toggleOnline = async function() {
+  const isOnline = !currentProfile.isOnline
+  try {
+    const updates = { isOnline }
+    if (isOnline && navigator.geolocation) {
+      await new Promise((res) => {
+        navigator.geolocation.getCurrentPosition(pos => {
+          updates.location = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+          if (map) map.setView([pos.coords.latitude, pos.coords.longitude], 16)
+          res()
+        }, res, { timeout: 5000 })
+      })
+    }
+    await updateDoc(doc(db, 'drivers', currentUser.uid), updates)
+    currentProfile.isOnline = isOnline
+    document.getElementById('d-status-badge').textContent = isOnline ? '🟢 En línea' : '⚫ Offline'
+    document.getElementById('toggle-btn').textContent = isOnline ? 'Desconectarme' : 'Conectarme'
+
+    if (isOnline) {
+      toast('🟢 ¡Estás en línea!')
+      startLocationWatch()
+      listenAvailableTrips()
+    } else {
+      toast('⚫ Desconectado')
+      if (watchId) navigator.geolocation.clearWatch(watchId)
+      if (availTripsUnsub) { availTripsUnsub(); availTripsUnsub = null }
+      document.getElementById('d-request-panel').style.display = 'none'
+      document.getElementById('d-idle-msg').style.display = 'flex'
+    }
+  } catch (e) {
+    toast('❌ ' + e.message)
+  }
+}
+
+function startLocationWatch() {
+  if (watchId) navigator.geolocation.clearWatch(watchId)
+  watchId = navigator.geolocation.watchPosition(async pos => {
+    const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+    if (userMarker) userMarker.setLatLng([loc.lat, loc.lng])
+    try {
+      await updateDoc(doc(db, 'drivers', currentUser.uid), {
+        location: { ...loc, updatedAt: serverTimestamp() }
+      })
+    } catch {}
+  }, () => {}, { enableHighAccuracy: true, maximumAge: 3000 })
+}
+
+function listenAvailableTrips() {
+  if (availTripsUnsub) availTripsUnsub()
+  availTripsUnsub = onSnapshot(
+    query(collection(db, 'trips'), where('status', '==', 'searching'), orderBy('createdAt', 'desc'), limit(5)),
+    async (snap) => {
+      // Filtrar por cercanía
+      const loc = currentProfile.location
+      if (!loc) return
+      for (const d of snap.docs) {
+        const trip = d.data()
+        if (trip.driverQueue?.includes(currentUser.uid)) continue
+        if (currentProfile.activeTrip) continue
+        const dist = haversineKm(loc.lat, loc.lng, trip.origin.lat, trip.origin.lng)
+        if (dist <= 5) {
+          showTripRequest(d.id, trip)
+          break
+        }
+      }
+    }
+  )
+}
+
+let currentRequestId = null
+let countdownTimer = null
+
+function showTripRequest(tripId, trip) {
+  if (currentRequestId === tripId) return
+  currentRequestId = tripId
+  document.getElementById('d-idle-msg').style.display = 'none'
+  document.getElementById('d-request-panel').style.display = 'flex'
+  document.getElementById('d-req-origin').textContent = trip.origin?.address || 'Origen'
+  document.getElementById('d-req-dest').textContent = trip.destination?.address || 'Destino'
+  document.getElementById('d-req-price').textContent = '$' + trip.price
+  document.getElementById('d-req-pax').textContent = trip.passengers + ' pasajero(s)'
+  document.getElementById('d-req-type').textContent = trip.type === 'exclusive' ? '🔒 Exclusivo' : '👥 Compartido'
+
+  // Mostrar en mapa
+  if (map && trip.origin) {
+    L.circleMarker([trip.origin.lat, trip.origin.lng], {
+      radius: 10, fillColor: '#1a6fff', fillOpacity: .8, color: '#fff', weight: 2
+    }).addTo(map).bindPopup('📍 Origen del viaje')
+    map.setView([trip.origin.lat, trip.origin.lng], 15)
+  }
+
+  let secs = 15
+  document.getElementById('d-countdown').textContent = secs
+  clearInterval(countdownTimer)
+  countdownTimer = setInterval(() => {
+    secs--
+    document.getElementById('d-countdown').textContent = secs
+    if (secs <= 0) {
+      clearInterval(countdownTimer)
+      rejectTripDriver(tripId)
+    }
+  }, 1000)
+}
+
+window.acceptTripDriver = async function() {
+  clearInterval(countdownTimer)
+  document.getElementById('d-request-panel').style.display = 'none'
+  try {
+    await updateDoc(doc(db, 'trips', currentRequestId), {
+      driverId: currentUser.uid, driverName: currentProfile.name,
+      status: 'accepted', acceptedAt: serverTimestamp()
+    })
+    await updateDoc(doc(db, 'drivers', currentUser.uid), { activeTrip: currentRequestId })
+    currentProfile.activeTrip = currentRequestId
+    currentTripId = currentRequestId
+    toast('✅ ¡Viaje aceptado!')
+    if (availTripsUnsub) { availTripsUnsub(); availTripsUnsub = null }
+    listenDriverTrip(currentRequestId)
+    document.getElementById('d-active-panel').style.display = 'flex'
+    document.getElementById('d-active-dest').textContent = 'Dirigiéndote al origen del cliente...'
+  } catch (e) {
+    toast('❌ ' + e.message)
+  }
+}
+
+window.rejectTripDriver = async function(id) {
+  clearInterval(countdownTimer)
+  currentRequestId = null
+  document.getElementById('d-request-panel').style.display = 'none'
+  document.getElementById('d-idle-msg').style.display = 'flex'
+  const tripId = id || currentRequestId
+  if (!tripId) return
+  try {
+    const snap = await getDoc(doc(db, 'trips', tripId))
+    if (snap.exists()) {
+      const q = snap.data().driverQueue || []
+      await updateDoc(doc(db, 'trips', tripId), { driverQueue: [...q, currentUser.uid] })
+    }
+  } catch {}
+}
+
+let driverTripStep = 0
+function listenDriverTrip(tripId) {
+  if (tripUnsub) tripUnsub()
+  tripUnsub = onSnapshot(doc(db, 'trips', tripId), snap => {
+    if (!snap.exists()) return
+    const trip = snap.data()
+    document.getElementById('d-active-dest').textContent =
+      trip.status === 'accepted'    ? '📍 Dirígete al origen: ' + (trip.origin?.address || '') :
+      trip.status === 'arrived'     ? '✅ Espera al pasajero' :
+      trip.status === 'in_progress' ? '🚗 En camino a: ' + (trip.destination?.address || '') :
+      trip.status === 'completed'   ? '🎉 Viaje completado' : ''
+    document.getElementById('d-active-price').textContent = '$' + trip.price + ' MXN en efectivo'
+  })
+}
+
+window.advanceTripDriver = async function() {
+  if (!currentTripId) return
+  const snap = await getDoc(doc(db, 'trips', currentTripId))
+  const trip = snap.data()
+  let nextStatus = ''
+  if (trip.status === 'accepted')    nextStatus = 'arrived'
+  if (trip.status === 'arrived')     nextStatus = 'in_progress'
+  if (trip.status === 'in_progress') nextStatus = 'completed'
+  if (!nextStatus) return
+
+  await updateDoc(doc(db, 'trips', currentTripId), {
+    status: nextStatus,
+    ...(nextStatus === 'completed' ? { completedAt: serverTimestamp() } : {})
+  })
+
+  if (nextStatus === 'completed') {
+    await updateDoc(doc(db, 'drivers', currentUser.uid), {
+      activeTrip: null, currentPassengers: 0,
+      totalTrips: (currentProfile.totalTrips || 0) + 1
+    })
+    currentProfile.activeTrip = null
+    currentTripId = null
+    document.getElementById('d-active-panel').style.display = 'none'
+    document.getElementById('d-idle-msg').style.display = 'flex'
+    toast('🎉 Viaje completado. ¡Buen trabajo!')
+    if (tripUnsub) { tripUnsub(); tripUnsub = null }
+    if (currentProfile.isOnline) listenAvailableTrips()
+  } else {
+    toast(nextStatus === 'arrived' ? '✅ Marcado como llegado al origen' : '🚗 Viaje iniciado')
+    const btn = document.getElementById('d-advance-btn')
+    btn.textContent = nextStatus === 'arrived' ? 'Iniciar viaje' : 'Completar viaje'
+  }
+}
+
+// ── ADMIN ─────────────────────────────────────────────────
+function initAdmin() {
+  document.getElementById('admin-email').textContent = currentProfile.name || 'Admin'
+  loadAdminData()
+}
+
+async function loadAdminData() {
+  // Viajes activos
+  const activeQ = query(collection(db, 'trips'),
+    where('status', 'in', ['searching','accepted','arrived','in_progress']))
+  onSnapshot(activeQ, snap => {
+    document.getElementById('a-active-trips').textContent = snap.size
+    const list = document.getElementById('a-trips-list')
+    list.innerHTML = snap.docs.slice(0,5).map(d => {
+      const t = d.data()
+      return `<div class="a-item">
+        <div class="a-item-info">
+          <span class="a-item-name">${t.origin?.address?.substring(0,25) || 'Origen'} → ${t.destination?.address?.substring(0,25) || 'Destino'}</span>
+          <span class="a-item-sub">${t.userName || 'Usuario'} · $${t.price} MXN · ${t.status}</span>
+        </div>
+        <span class="badge badge-blue">${t.type === 'exclusive' ? '🔒' : '👥'}</span>
+      </div>`
+    }).join('') || '<p style="color:var(--txt3);font-size:13px;padding:8px 0">Sin viajes activos</p>'
+  })
+
+  // Conductores
+  onSnapshot(collection(db, 'drivers'), snap => {
+    const online = snap.docs.filter(d => d.data().isOnline).length
+    document.getElementById('a-drivers-online').textContent = online
+    document.getElementById('a-total-drivers').textContent = snap.size
+    const list = document.getElementById('a-drivers-list')
+    list.innerHTML = snap.docs.slice(0,5).map(d => {
+      const dr = d.data()
+      return `<div class="a-item">
+        <div class="a-item-avatar">${dr.name?.[0]?.toUpperCase() || '?'}</div>
+        <div class="a-item-info">
+          <span class="a-item-name">${dr.name}</span>
+          <span class="a-item-sub">${dr.phone || ''} · ${dr.isOnline ? '🟢 En línea' : '⚫ Offline'}</span>
+        </div>
+        <span class="badge ${dr.status === 'active' ? 'badge-green' : 'badge-amber'}">${dr.status}</span>
+      </div>`
+    }).join('') || '<p style="color:var(--txt3);font-size:13px;padding:8px 0">Sin conductores</p>'
+  })
+
+  // Alertas
+  onSnapshot(query(collection(db, 'alerts'), where('status','==','active')), snap => {
+    document.getElementById('a-alerts').textContent = snap.size
+    const list = document.getElementById('a-alerts-list')
+    list.innerHTML = snap.docs.map(d => {
+      const a = d.data()
+      return `<div class="a-item" style="border-color:rgba(239,68,68,.3)">
+        <div class="a-item-info">
+          <span class="a-item-name">🚨 ${a.userName || 'Usuario'}</span>
+          <span class="a-item-sub">Tipo: ${a.type} · ${a.notes || ''}</span>
+        </div>
+        <button onclick="resolveAlert('${d.id}')" class="a-btn-sm a-btn-green">Resolver</button>
+      </div>`
+    }).join('') || '<p style="color:var(--txt3);font-size:13px;padding:8px 0">Sin alertas ✓</p>'
+  })
+}
+
+window.resolveAlert = async function(id) {
+  await updateDoc(doc(db, 'alerts', id), { status: 'resolved', resolvedAt: serverTimestamp() })
+  toast('✓ Alerta resuelta')
+}
+
+window.showAdminTab = function(tab) {
+  document.querySelectorAll('.a-tab').forEach(t => t.classList.remove('active'))
+  document.querySelectorAll('.a-section').forEach(s => s.style.display = 'none')
+  document.getElementById('a-tab-' + tab).classList.add('active')
+  document.getElementById('a-sec-' + tab).style.display = 'block'
+}
+
+window.setStar = function(n) {
+  document.getElementById('u-star-val').value = n
+  document.querySelectorAll('.star-btn').forEach((s,i) => {
+    s.textContent = i < n ? '⭐' : '☆'
+  })
+}
+
+</script>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#070708;--bg2:#0f0f11;--bg3:#17171a;--bg4:#202024;--bg5:#2a2a30;
+  --brand:#1a6fff;--brand2:#0d4fd6;--green:#22c55e;--red:#ef4444;--amber:#f59e0b;
+  --txt:#f0f0f2;--txt2:#8a8a9a;--txt3:#4a4a5a;--border:#1e1e24;
+}
+html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'DM Sans',system-ui,sans-serif;overflow:hidden}
+#app{height:100%;display:flex;flex-direction:column;max-width:430px;margin:0 auto;position:relative}
+.screen{display:none;flex-direction:column;height:100%;overflow:hidden}
+
+/* LEAFLET dark override */
+.leaflet-container{background:#0a0e1a!important}
+.leaflet-control-attribution{display:none}
+
+/* SPLASH */
+#splash{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;height:100%;background:var(--bg)}
+.splash-logo{width:72px;height:72px;background:var(--brand);border-radius:22px;display:flex;align-items:center;justify-content:center;font-size:32px;box-shadow:0 0 50px rgba(26,111,255,.5)}
+.splash-title{font-size:26px;font-weight:700;letter-spacing:-.02em}
+.spinner{width:28px;height:28px;border:2.5px solid var(--bg4);border-top-color:var(--brand);border-radius:50%;animation:spin .8s linear infinite;margin-top:12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* LOGIN */
+#login{overflow-y:auto;padding:0 22px 40px}
+.login-logo-sm{width:48px;height:48px;background:var(--brand);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:16px;margin-top:50px;box-shadow:0 0 30px rgba(26,111,255,.3)}
+.login-h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin-bottom:4px}
+.login-sub{font-size:13px;color:var(--txt2);margin-bottom:24px}
+.tabs{display:flex;gap:6px;margin-bottom:20px;background:var(--bg3);padding:4px;border-radius:12px}
+.login-tab{flex:1;padding:9px 6px;border-radius:9px;border:none;background:transparent;color:var(--txt2);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s}
+.login-tab.active{background:var(--brand);color:#fff}
+.login-section{flex-direction:column;gap:10px}
+.lbl{font-size:11px;font-weight:600;color:var(--txt2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+.inp{width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:11px;padding:14px 15px;color:var(--txt);font-size:14px;font-family:inherit;outline:none;transition:border-color .15s}
+.inp:focus{border-color:var(--brand)}
+.inp::placeholder{color:var(--txt3)}
+.btn{width:100%;padding:15px;border-radius:12px;font-size:14px;font-weight:600;font-family:inherit;border:none;cursor:pointer;transition:all .15s;margin-top:4px}
+.btn-p{background:var(--brand);color:#fff}
+.btn-p:active{background:var(--brand2);transform:scale(.98)}
+.btn-p:disabled{opacity:.5;cursor:not-allowed}
+.btn-g{background:var(--bg3);color:var(--txt2);font-size:13px;padding:13px}
+.btn-d{background:var(--red);color:#fff}
+
+/* SHARED */
+.badge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.03em}
+.badge-green{background:rgba(34,197,94,.12);color:var(--green)}
+.badge-blue{background:rgba(26,111,255,.15);color:var(--brand)}
+.badge-amber{background:rgba(245,158,11,.12);color:var(--amber)}
+.badge-red{background:rgba(239,68,68,.12);color:var(--red)}
+.card{background:var(--bg2);border-radius:18px;border:1px solid var(--border)}
+.divider{height:1px;background:var(--border)}
+
+/* USER MAP */
+#user-map{position:relative}
+#user-map-div{flex:1;z-index:1}
+.map-topbar{position:absolute;top:0;left:0;right:0;z-index:10;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;pointer-events:none}
+.map-topbar>*{pointer-events:auto}
+.map-name-chip{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:8px 14px;font-size:14px;font-weight:600;backdrop-filter:blur(10px)}
+.logout-btn{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--txt2);cursor:pointer;font-family:inherit;backdrop-filter:blur(10px)}
+
+.bottom-sheet{background:var(--bg2);border-radius:22px 22px 0 0;border-top:1px solid var(--border);padding:18px 18px 28px;z-index:10;animation:slideUp .25s ease}
+.handle{width:32px;height:4px;background:var(--bg5);border-radius:2px;margin:0 auto 14px}
+.route-display{background:var(--bg3);border-radius:13px;padding:12px 14px;margin-bottom:12px}
+.route-row{display:flex;align-items:flex-start;gap:10px;padding:4px 0}
+.dot-o{width:9px;height:9px;border-radius:50%;background:#fff;border:2px solid var(--txt2);flex-shrink:0;margin-top:3px}
+.dot-d{width:9px;height:9px;border-radius:50%;background:var(--brand);flex-shrink:0;margin-top:3px}
+.route-addr{font-size:13px;color:var(--txt2);flex:1;line-height:1.4}
+
+.type-row{display:flex;gap:8px;margin-bottom:10px}
+.type-btn{flex:1;padding:11px;border-radius:11px;background:var(--bg3);border:1.5px solid var(--border);font-size:13px;font-weight:600;color:var(--txt2);cursor:pointer;font-family:inherit;transition:all .15s}
+.type-btn.active{border-color:var(--brand);background:rgba(26,111,255,.1);color:var(--brand)}
+
+.pax-row{display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.pax-lbl{font-size:13px;color:var(--txt2)}
+.pax-ctrl{display:flex;align-items:center;gap:12px}
+.pax-btn{width:30px;height:30px;border-radius:50%;background:var(--bg4);border:none;color:var(--txt);font-size:18px;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center}
+.pax-n{font-size:16px;font-weight:700;width:18px;text-align:center}
+
+.price-row{display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border-radius:12px;padding:13px 14px;margin-bottom:12px}
+.price-meta{font-size:13px;color:var(--txt2)}
+.price-big{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+
+/* SEARCHING */
+.search-center{text-align:center;padding:10px 0}
+.rings{position:relative;width:80px;height:80px;margin:0 auto 16px}
+.ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--brand);animation:ripple 1.8s ease-out infinite}
+.ring:nth-child(2){animation-delay:.6s}.ring:nth-child(3){animation-delay:1.2s}
+@keyframes ripple{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.5);opacity:0}}
+.ring-center{position:absolute;inset:18px;border-radius:50%;background:var(--brand);display:flex;align-items:center;justify-content:center;font-size:22px}
+
+/* ACTIVE TRIP */
+.driver-chip{display:flex;align-items:center;gap:12px;background:var(--bg3);border-radius:14px;padding:13px 14px;margin-bottom:12px}
+.driver-av{width:44px;height:44px;border-radius:50%;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.driver-info{flex:1}
+.driver-n{font-size:15px;font-weight:700}
+.driver-r{font-size:12px;color:var(--txt2)}
+.driver-p{text-align:right}
+.driver-plbl{font-size:10px;color:var(--txt2)}
+.driver-pamt{font-size:18px;font-weight:700}
+.status-pill{display:flex;align-items:center;gap:7px;margin-bottom:12px}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 1.5s ease infinite;flex-shrink:0}
+.stxt{font-size:13px;font-weight:600;color:var(--green)}
+
+/* RATING */
+.rating-sheet{padding:24px 18px 32px;text-align:center}
+.rating-av{width:72px;height:72px;border-radius:50%;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:30px;margin:0 auto 10px;border:3px solid var(--brand)}
+.rating-n{font-size:18px;font-weight:700;margin-bottom:4px}
+.rating-s{font-size:13px;color:var(--txt2);margin-bottom:20px}
+.stars-row{display:flex;gap:10px;justify-content:center;margin-bottom:16px}
+.star-btn{font-size:32px;background:none;border:none;cursor:pointer;transition:transform .15s}
+.star-btn:active{transform:scale(1.2)}
+.comment-inp{width:100%;height:72px;resize:none;margin-bottom:12px}
+
+/* EMERGENCY */
+#u-emerg-btn{position:absolute;top:72px;right:14px;z-index:20;width:50px;height:50px;border-radius:50%;background:var(--red);border:none;font-size:20px;cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 0 20px rgba(239,68,68,.5)}
+
+/* DRIVER */
+#driver{flex-direction:column}
+.d-header{padding:15px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.d-name{font-size:16px;font-weight:700}
+.d-badge{font-size:12px;color:var(--txt2);margin-top:2px}
+.d-actions{display:flex;align-items:center;gap:10px}
+#driver-map-div{flex:1}
+.d-request{position:absolute;bottom:0;left:0;right:0;background:var(--bg2);border-radius:22px 22px 0 0;border-top:1px solid var(--border);padding:20px 18px 28px;z-index:20;display:none;flex-direction:column;animation:slideUp .3s ease}
+.d-req-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.d-req-title{font-size:17px;font-weight:700}
+.d-cd{width:48px;height:48px;border-radius:50%;background:var(--brand);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700}
+.d-route{background:var(--bg3);border-radius:12px;padding:12px 14px;margin-bottom:12px}
+.d-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px}
+.d-stat{background:var(--bg3);border-radius:11px;padding:11px;text-align:center}
+.d-stat-v{font-size:14px;font-weight:700;margin-bottom:2px}
+.d-stat-l{font-size:10px;color:var(--txt2)}
+.d-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.d-idle{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:20px}
+.d-idle-icon{font-size:44px;opacity:.3;margin-bottom:6px}
+.d-idle-t{font-size:17px;font-weight:700}
+.d-idle-s{font-size:13px;color:var(--txt2);max-width:200px;line-height:1.5}
+.d-active{background:var(--bg2);border-top:1px solid var(--border);padding:18px;display:none;flex-direction:column;gap:10px}
+.d-active-status{font-size:13px;color:var(--green);font-weight:600}
+.d-active-price{font-size:13px;color:var(--txt2)}
+.toggle-btn-style{padding:9px 18px;border-radius:22px;font-size:13px;font-weight:700;border:none;cursor:pointer;font-family:inherit;transition:all .15s}
+
+/* ADMIN */
+#admin{overflow-y:auto}
+.a-header{padding:18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:var(--bg);z-index:10}
+.a-title{font-size:20px;font-weight:700}
+.a-tabs{display:flex;padding:14px 18px 0;gap:6px;background:var(--bg);position:sticky;top:64px;z-index:9}
+.a-tab{flex:1;padding:10px;border-radius:10px;border:none;background:var(--bg3);color:var(--txt2);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s}
+.a-tab.active{background:var(--brand);color:#fff}
+.a-section{padding:14px 18px;display:none}
+.a-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.a-stat{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:14px}
+.a-stat-icon{font-size:18px;margin-bottom:8px}
+.a-stat-val{font-size:26px;font-weight:700;margin-bottom:2px}
+.a-stat-lbl{font-size:11px;color:var(--txt2)}
+.a-sec-title{font-size:11px;font-weight:700;color:var(--txt2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.a-item{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--border);border-radius:13px;padding:12px 13px;margin-bottom:8px}
+.a-item-avatar{width:36px;height:36px;border-radius:50%;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0;color:var(--brand)}
+.a-item-info{flex:1;display:flex;flex-direction:column;gap:2px}
+.a-item-name{font-size:13px;font-weight:600}
+.a-item-sub{font-size:11px;color:var(--txt2)}
+.a-btn-sm{padding:5px 11px;border-radius:8px;border:none;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
+.a-btn-green{background:rgba(34,197,94,.15);color:var(--green)}
+
+/* TOAST */
+#toast{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-70px);background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:11px 18px;font-size:13px;font-weight:500;z-index:200;transition:transform .3s cubic-bezier(.34,1.56,.64,1);white-space:nowrap;box-shadow:0 8px 32px rgba(0,0,0,.6);max-width:90vw;text-align:center}
+#toast.show{transform:translateX(-50%) translateY(0)}
+
+/* DRIVER RELATIVE CONTAINER */
+#driver{position:relative}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- SPLASH -->
+<div id="splash" class="screen" style="display:flex">
+  <div class="splash-logo">🏍️</div>
+  <div class="splash-title">Mototaxi Impulso</div>
+  <div style="font-size:13px;color:var(--txt2)">Beta · Tláhuac CDMX</div>
+  <div class="spinner"></div>
+</div>
+
+<!-- LOGIN -->
+<div id="login" class="screen">
+  <div class="login-logo-sm">🏍️</div>
+  <div class="login-h1">Bienvenido</div>
+  <div class="login-sub">Selecciona tu tipo de cuenta</div>
+
+  <div class="tabs">
+    <button class="login-tab active" id="tab-user" onclick="showTab('user')">👤 Usuario</button>
+    <button class="login-tab" id="tab-driver" onclick="showTab('driver')">🏍️ Conductor</button>
+    <button class="login-tab" id="tab-login" onclick="showTab('login')">Iniciar sesión</button>
+  </div>
+
+  <!-- Registro usuario -->
+  <div id="section-user" class="login-section" style="display:flex">
+    <div><div class="lbl">Nombre completo</div><input class="inp" id="r-name" placeholder="Tu nombre"/></div>
+    <div><div class="lbl">Teléfono</div><input class="inp" id="r-phone" type="tel" placeholder="+521XXXXXXXXXX"/></div>
+    <div><div class="lbl">Correo</div><input class="inp" id="r-email" type="email" placeholder="tu@correo.com"/></div>
+    <div><div class="lbl">Contraseña</div><input class="inp" id="r-pass" type="password" placeholder="Mínimo 6 caracteres"/></div>
+    <button class="btn btn-p" id="reg-btn" onclick="doRegisterUser()">Crear cuenta de usuario</button>
+  </div>
+
+  <!-- Registro conductor -->
+  <div id="section-driver" class="login-section" style="display:none">
+    <div><div class="lbl">Nombre completo</div><input class="inp" id="d-name" placeholder="Tu nombre"/></div>
+    <div><div class="lbl">Teléfono</div><input class="inp" id="d-phone" type="tel" placeholder="+521XXXXXXXXXX"/></div>
+    <div><div class="lbl">Correo</div><input class="inp" id="d-email" type="email" placeholder="tu@correo.com"/></div>
+    <div><div class="lbl">Contraseña</div><input class="inp" id="d-pass" type="password" placeholder="Mínimo 6 caracteres"/></div>
+    <button class="btn btn-p" id="dreg-btn" onclick="doRegisterDriver()">Registrarme como conductor</button>
+    <p style="font-size:11px;color:var(--txt3);text-align:center;margin-top:4px">Beta: aprobación automática</p>
+  </div>
+
+  <!-- Login -->
+  <div id="section-login" class="login-section" style="display:none">
+    <div><div class="lbl">Correo</div><input class="inp" id="l-email" type="email" placeholder="tu@correo.com"/></div>
+    <div><div class="lbl">Contraseña</div><input class="inp" id="l-pass" type="password" placeholder="••••••••"/></div>
+    <button class="btn btn-p" id="login-btn" onclick="doLogin()">Iniciar sesión</button>
+  </div>
+</div>
+
+<!-- USER MAP -->
+<div id="user-map" class="screen" style="position:relative">
+  <div id="user-map-div"></div>
+
+  <div class="map-topbar">
+    <div class="map-name-chip">👋 <span id="u-name">Usuario</span></div>
+    <button class="logout-btn" onclick="doLogout()">Salir</button>
+  </div>
+
+  <button id="u-emerg-btn" onclick="sendEmergency()">🚨</button>
+
+  <!-- Panel idle -->
+  <div id="u-panel-idle" class="u-panel bottom-sheet">
+    <div class="handle"></div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:12px">¿A dónde vas?</div>
+    <div class="route-display">
+      <div class="route-row">
+        <div class="dot-o"></div>
+        <div class="route-addr" id="u-origin-txt">Toca para seleccionar</div>
+      </div>
+      <div style="width:1px;height:10px;background:var(--border);margin-left:3px"></div>
+      <div class="route-row">
+        <div class="dot-d"></div>
+        <div class="route-addr" id="u-dest-txt">Toca el mapa para marcar</div>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--txt3);text-align:center">👆 Toca el mapa para marcar origen y destino</p>
+  </div>
+
+  <!-- Panel confirmación -->
+  <div id="u-panel-confirm" class="u-panel bottom-sheet" style="display:none">
+    <div class="handle"></div>
+    <div class="route-display" style="margin-bottom:10px">
+      <div class="route-row">
+        <div class="dot-o"></div>
+        <div class="route-addr" id="u-origin-txt2">Origen</div>
+      </div>
+      <div style="width:1px;height:10px;background:var(--border);margin-left:3px"></div>
+      <div class="route-row">
+        <div class="dot-d"></div>
+        <div class="route-addr" id="u-dest-txt2">Destino</div>
+      </div>
+    </div>
+
+    <div class="type-row">
+      <button class="type-btn active" onclick="setTripType('exclusive',this)">🔒 Exclusivo</button>
+      <button class="type-btn" onclick="setTripType('shared',this)">👥 Compartido</button>
+    </div>
+
+    <div class="pax-row">
+      <span class="pax-lbl">👤 Pasajeros</span>
+      <div class="pax-ctrl">
+        <button class="pax-btn" onclick="setPax(-1)">−</button>
+        <span class="pax-n" id="u-pax">1</span>
+        <button class="pax-btn" onclick="setPax(1)">+</button>
+      </div>
+    </div>
+
+    <div class="price-row">
+      <div>
+        <div class="price-meta" id="u-dist">— km</div>
+        <div style="font-size:11px;color:var(--txt3)">Efectivo al conductor</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:11px;color:var(--txt2)">Total</div>
+        <div class="price-big" id="u-price">$—</div>
+      </div>
+    </div>
+
+    <button class="btn btn-p" id="req-trip-btn" onclick="requestTrip()">Solicitar mototaxi 🏍️</button>
+    <button class="btn btn-g" style="margin-top:8px" onclick="resetUserTrip()">Cancelar</button>
+  </div>
+
+  <!-- Panel buscando -->
+  <div id="u-panel-searching" class="u-panel bottom-sheet" style="display:none">
+    <div class="handle"></div>
+    <div class="search-center">
+      <div class="rings">
+        <div class="ring"></div><div class="ring"></div><div class="ring"></div>
+        <div class="ring-center">🏍️</div>
+      </div>
+      <div style="font-size:17px;font-weight:700;margin-bottom:6px">Buscando conductor</div>
+      <div style="font-size:13px;color:var(--txt2);margin-bottom:18px">Conectando con mototaxistas cercanos...</div>
+      <button class="btn btn-g" onclick="cancelTripUser()">Cancelar búsqueda</button>
+    </div>
+  </div>
+
+  <!-- Panel viaje activo -->
+  <div id="u-panel-active" class="u-panel bottom-sheet" style="display:none">
+    <div class="handle"></div>
+    <div class="status-pill">
+      <div class="sdot"></div>
+      <span class="stxt" id="u-trip-status">Conductor en camino</span>
+    </div>
+    <div class="driver-chip">
+      <div class="driver-av">🏍️</div>
+      <div class="driver-info">
+        <div class="driver-n" id="u-driver-name">Conductor</div>
+        <div class="driver-r" id="u-driver-rating">⭐ 5.0</div>
+      </div>
+      <div class="driver-p">
+        <div class="driver-plbl">A pagar</div>
+        <div class="driver-pamt" id="u-trip-price">$0</div>
+      </div>
+    </div>
+    <p style="font-size:11px;color:var(--txt3);text-align:center">Pago en efectivo · 🚨 = emergencia</p>
+  </div>
+
+  <!-- Panel rating -->
+  <div id="u-panel-rating" class="u-panel bottom-sheet rating-sheet" style="display:none">
+    <div class="handle"></div>
+    <div class="rating-av">🏍️</div>
+    <div class="rating-n">¿Cómo estuvo tu viaje?</div>
+    <div class="rating-s">Viaje completado · $<span id="u-trip-final-price">0</span> MXN</div>
+    <input type="hidden" id="u-star-val" value="5"/>
+    <div class="stars-row">
+      <button class="star-btn" onclick="setStar(1)">⭐</button>
+      <button class="star-btn" onclick="setStar(2)">⭐</button>
+      <button class="star-btn" onclick="setStar(3)">⭐</button>
+      <button class="star-btn" onclick="setStar(4)">⭐</button>
+      <button class="star-btn" onclick="setStar(5)">⭐</button>
+    </div>
+    <textarea class="inp comment-inp" id="u-comment" placeholder="Comentario opcional..."></textarea>
+    <button class="btn btn-p" onclick="submitRating()">Enviar calificación</button>
+    <button class="btn btn-g" style="margin-top:8px" onclick="submitRating()">Omitir</button>
+  </div>
+</div>
+
+<!-- DRIVER -->
+<div id="driver" class="screen">
+  <div class="d-header">
+    <div>
+      <div class="d-name" id="d-name-display">Conductor</div>
+      <div class="d-badge" id="d-status-badge">⚫ Offline</div>
+    </div>
+    <div class="d-actions">
+      <button class="toggle-btn-style" id="toggle-btn"
+        style="background:var(--brand);color:#fff"
+        onclick="toggleOnline()">Conectarme</button>
+      <button class="logout-btn" onclick="doLogout()">Salir</button>
+    </div>
+  </div>
+
+  <div id="driver-map-div" style="flex:1;position:relative"></div>
+
+  <!-- Solicitud entrante -->
+  <div id="d-request-panel" class="d-request">
+    <div class="d-req-hdr">
+      <div class="d-req-title">🔔 Nueva solicitud</div>
+      <div class="d-cd" id="d-countdown">15</div>
+    </div>
+    <div class="d-route">
+      <div class="route-row" style="display:flex;gap:10px;align-items:flex-start;padding:3px 0">
+        <div class="dot-o" style="margin-top:3px;flex-shrink:0"></div>
+        <div style="font-size:13px;color:var(--txt2)" id="d-req-origin">Origen</div>
+      </div>
+      <div style="width:1px;height:10px;background:var(--border);margin-left:3px"></div>
+      <div class="route-row" style="display:flex;gap:10px;align-items:flex-start;padding:3px 0">
+        <div class="dot-d" style="margin-top:3px;flex-shrink:0"></div>
+        <div style="font-size:13px" id="d-req-dest">Destino</div>
+      </div>
+    </div>
+    <div class="d-stats">
+      <div class="d-stat"><div class="d-stat-v" id="d-req-price">$0</div><div class="d-stat-l">Total</div></div>
+      <div class="d-stat"><div class="d-stat-v" id="d-req-pax">1</div><div class="d-stat-l">Pasajeros</div></div>
+      <div class="d-stat"><div class="d-stat-v" id="d-req-type">🔒</div><div class="d-stat-l">Tipo</div></div>
+    </div>
+    <div class="d-btns">
+      <button class="btn btn-g" onclick="rejectTripDriver()">Rechazar</button>
+      <button class="btn btn-p" onclick="acceptTripDriver()">Aceptar ✓</button>
+    </div>
+  </div>
+
+  <!-- Idle -->
+  <div class="d-idle" id="d-idle-msg">
+    <div class="d-idle-icon">🏍️</div>
+    <div class="d-idle-t">Estás desconectado</div>
+    <div class="d-idle-s">Toca "Conectarme" para empezar a recibir solicitudes de viaje</div>
+  </div>
+
+  <!-- Viaje activo -->
+  <div class="d-active" id="d-active-panel">
+    <div class="d-active-status" id="d-active-dest">Viaje activo</div>
+    <div class="d-active-price" id="d-active-price"></div>
+    <button class="btn btn-p" id="d-advance-btn" onclick="advanceTripDriver()">Llegué al origen</button>
+  </div>
+</div>
+
+<!-- ADMIN -->
+<div id="admin" class="screen">
+  <div class="a-header">
+    <div>
+      <div class="a-title">Panel Admin</div>
+      <div style="font-size:12px;color:var(--txt2)" id="admin-email">admin</div>
+    </div>
+    <button class="logout-btn" onclick="doLogout()">Salir</button>
+  </div>
+
+  <div class="a-tabs">
+    <button class="a-tab active" id="a-tab-overview" onclick="showAdminTab('overview')">Resumen</button>
+    <button class="a-tab" id="a-tab-drivers" onclick="showAdminTab('drivers')">Conductores</button>
+    <button class="a-tab" id="a-tab-alerts" onclick="showAdminTab('alerts')">Alertas</button>
+  </div>
+
+  <!-- Overview -->
+  <div id="a-sec-overview" class="a-section" style="display:block">
+    <div class="a-stats">
+      <div class="a-stat">
+        <div class="a-stat-icon">🏍️</div>
+        <div class="a-stat-val" id="a-active-trips">0</div>
+        <div class="a-stat-lbl">Viajes activos</div>
+      </div>
+      <div class="a-stat">
+        <div class="a-stat-icon">👤</div>
+        <div class="a-stat-val" id="a-drivers-online">0</div>
+        <div class="a-stat-lbl">En línea</div>
+      </div>
+      <div class="a-stat">
+        <div class="a-stat-icon">🚗</div>
+        <div class="a-stat-val" id="a-total-drivers">0</div>
+        <div class="a-stat-lbl">Conductores</div>
+      </div>
+      <div class="a-stat">
+        <div class="a-stat-icon">🚨</div>
+        <div class="a-stat-val" id="a-alerts">0</div>
+        <div class="a-stat-lbl">Alertas</div>
+      </div>
+    </div>
+    <div class="a-sec-title">Viajes en curso</div>
+    <div id="a-trips-list"></div>
+  </div>
+
+  <!-- Drivers -->
+  <div id="a-sec-drivers" class="a-section">
+    <div class="a-sec-title">Conductores registrados</div>
+    <div id="a-drivers-list"></div>
+  </div>
+
+  <!-- Alerts -->
+  <div id="a-sec-alerts" class="a-section">
+    <div class="a-sec-title">Alertas de emergencia activas</div>
+    <div id="a-alerts-list"></div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<script>
+// Sync confirm panel addresses
+const obs = new MutationObserver(() => {
+  const o2 = document.getElementById('u-origin-txt2')
+  const d2 = document.getElementById('u-dest-txt2')
+  if (o2) o2.textContent = document.getElementById('u-origin-txt').textContent
+  if (d2) d2.textContent = document.getElementById('u-dest-txt').textContent
+})
+obs.observe(document.getElementById('u-origin-txt'), { childList: true, characterData: true, subtree: true })
+
+async function cancelTripUser() {
+  if (currentTripId) {
+    try {
+      await updateDoc(doc(db, 'trips', currentTripId), {
+        status: 'cancelled', cancelReason: 'Cancelado por usuario', cancelledAt: serverTimestamp()
+      })
+      await updateDoc(doc(db, 'users', currentUser.uid), { activeTrip: null })
+    } catch {}
+  }
+  resetUserTrip()
+}
+</script>
+
+</body>
+</html>
