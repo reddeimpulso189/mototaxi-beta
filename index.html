@@ -251,16 +251,7 @@ function initUserMap() {
         L.circleMarker([lat, lng], {
           radius: 9, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
         }).addTo(map).bindPopup('🏁 Destino').openPopup()
-        if (routeLine) map.removeLayer(routeLine)
-        routeLine = L.polyline([
-          [selectedOrigin.lat, selectedOrigin.lng],
-          [selectedDest.lat, selectedDest.lng]
-        ], { color: '#1a6fff', weight: 4, opacity: .8, dashArray: '8,4' }).addTo(map)
-        const dist = haversineKm(selectedOrigin.lat, selectedOrigin.lng, selectedDest.lat, selectedDest.lng) * 1000
-        const price = calcPrice(dist, passengers)
-        document.getElementById('u-price').textContent = '$' + price
-        document.getElementById('u-dist').textContent = (dist/1000).toFixed(1) + ' km'
-        showUserPanel('confirm')
+        await drawRealRoute(selectedOrigin, selectedDest)
       }
     })
   }, 300)
@@ -315,23 +306,48 @@ window.searchRoute = function() {
       radius: 9, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
     }).addTo(map).bindPopup('🏁 ' + destVal)
 
+    await drawRealRoute(selectedOrigin, selectedDest)
+}
+
+
+window.drawRealRoute = async function(origin, dest) {
+  try {
+    // OSRM - enrutamiento real GRATIS por calles reales
+    const url = `https://router.project-osrm.org/route/v1/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}?overview=full&geometries=geojson`
+    const res  = await fetch(url)
+    const data = await res.json()
+
+    if (data.routes && data.routes[0]) {
+      const route    = data.routes[0]
+      const coords   = route.geometry.coordinates.map(c => [c[1], c[0]])
+      const distM    = route.distance
+      const durationMin = Math.ceil(route.duration / 60)
+      const price    = calcPrice(distM, passengers)
+
+      if (routeLine) map.removeLayer(routeLine)
+      routeLine = L.polyline(coords, {
+        color: '#1a6fff', weight: 5, opacity: .85
+      }).addTo(map)
+
+      const bounds = L.latLngBounds(coords)
+      map.fitBounds(bounds, { padding: [80, 80] })
+
+      document.getElementById('u-price').textContent = '$' + price
+      document.getElementById('u-dist').textContent  = (distM/1000).toFixed(1) + ' km · ' + durationMin + ' min'
+    } else {
+      throw new Error('No route')
+    }
+  } catch {
+    // Fallback línea recta si OSRM falla
+    const dist = haversineKm(origin.lat, origin.lng, dest.lat, dest.lng) * 1000
     if (routeLine) map.removeLayer(routeLine)
     routeLine = L.polyline([
-      [selectedOrigin.lat, selectedOrigin.lng],
-      [selectedDest.lat, selectedDest.lng]
+      [origin.lat, origin.lng], [dest.lat, dest.lng]
     ], { color: '#1a6fff', weight: 4, opacity: .8, dashArray: '8,4' }).addTo(map)
-
-    const bounds = L.latLngBounds([
-      [selectedOrigin.lat, selectedOrigin.lng],
-      [selectedDest.lat, selectedDest.lng]
-    ])
-    map.fitBounds(bounds, { padding: [60, 60] })
+    map.fitBounds([[origin.lat, origin.lng],[dest.lat, dest.lng]], { padding: [80,80] })
+    document.getElementById('u-price').textContent = '$' + calcPrice(dist, passengers)
+    document.getElementById('u-dist').textContent  = (dist/1000).toFixed(1) + ' km'
   }
-
-  const dist = haversineKm(selectedOrigin.lat, selectedOrigin.lng, selectedDest.lat, selectedDest.lng) * 1000
-  const price = calcPrice(Math.max(dist, 500), passengers)
-  document.getElementById('u-price').textContent = '$' + price
-  document.getElementById('u-dist').textContent = (Math.max(dist,500)/1000).toFixed(1) + ' km'
   showUserPanel('confirm')
 }
 
@@ -1037,39 +1053,27 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'DM Sans
     <p style="font-size:11px;color:var(--txt3);text-align:center;margin-top:8px">O toca el mapa: 1er toque = origen · 2do toque = destino</p>
   </div>
 
-  <!-- Panel confirmación -->
-  <div id="u-panel-confirm" class="u-panel" style="display:none;position:absolute;bottom:0;left:0;right:0;background:var(--bg2);border-radius:22px 22px 0 0;border-top:1px solid var(--border);padding:14px 16px 24px;z-index:10;animation:slideUp .25s ease">
-    <div class="handle"></div>
-
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div style="flex:1">
-        <div style="font-size:11px;color:var(--txt3)">De → A</div>
-        <div style="font-size:12px;color:var(--txt2)" id="u-origin-txt2">Origen</div>
-      </div>
-      <div style="font-size:20px;color:var(--txt3)">→</div>
-      <div style="flex:1;text-align:right">
-        <div style="font-size:11px;color:var(--txt3)">Destino</div>
-        <div style="font-size:12px;color:var(--txt2)" id="u-dest-txt2">Destino</div>
+  <!-- Panel confirmación COMPACTO -->
+  <div id="u-panel-confirm" class="u-panel" style="display:none;position:absolute;bottom:0;left:0;right:0;background:var(--bg2);border-top:1px solid var(--border);padding:12px 14px 20px;z-index:10;animation:slideUp .25s ease">
+    <!-- Fila 1: tipo + pasajeros -->
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button class="type-btn active" onclick="setTripType('exclusive',this)" style="flex:1;padding:9px 4px;font-size:12px">🔒 Exclusivo</button>
+      <button class="type-btn" onclick="setTripType('shared',this)" style="flex:1;padding:9px 4px;font-size:12px">👥 Compartido</button>
+      <div style="display:flex;align-items:center;gap:6px;background:var(--bg3);border-radius:10px;padding:8px 10px;flex-shrink:0">
+        <button class="pax-btn" onclick="setPax(-1)" style="width:22px;height:22px;font-size:15px;line-height:1">−</button>
+        <span id="u-pax" style="font-size:14px;font-weight:700;min-width:12px;text-align:center">1</span>
+        <button class="pax-btn" onclick="setPax(1)" style="width:22px;height:22px;font-size:15px;line-height:1">+</button>
       </div>
     </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;align-items:center">
-      <button class="type-btn active" onclick="setTripType('exclusive',this)" style="padding:10px 6px;font-size:12px">🔒 Exclusivo</button>
-      <button class="type-btn" onclick="setTripType('shared',this)" style="padding:10px 6px;font-size:12px">👥 Compartido</button>
-      <div style="display:flex;align-items:center;justify-content:center;gap:8px;background:var(--bg3);border-radius:11px;padding:10px 6px">
-        <button class="pax-btn" onclick="setPax(-1)" style="width:24px;height:24px;font-size:16px">−</button>
-        <span class="pax-n" id="u-pax" style="font-size:14px">1</span>
-        <button class="pax-btn" onclick="setPax(1)" style="width:24px;height:24px;font-size:16px">+</button>
+    <!-- Fila 2: precio + botón solicitar -->
+    <div style="display:flex;gap:8px;align-items:center">
+      <div style="background:var(--bg3);border-radius:10px;padding:10px 12px;flex-shrink:0">
+        <div style="font-size:10px;color:var(--txt3)"><span id="u-dist">—</span></div>
+        <div style="font-size:20px;font-weight:700" id="u-price">$—</div>
       </div>
+      <button class="btn btn-p" id="req-trip-btn" onclick="requestTrip()" style="flex:1;padding:14px;font-size:14px;margin:0">Solicitar 🏍️</button>
+      <button onclick="resetUserTrip()" style="background:var(--bg3);border:none;border-radius:10px;padding:10px;color:var(--txt2);cursor:pointer;font-size:18px;flex-shrink:0">✕</button>
     </div>
-
-    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border-radius:12px;padding:10px 14px;margin-bottom:10px">
-      <div style="font-size:12px;color:var(--txt2)"><span id="u-dist">—</span> · Efectivo</div>
-      <div style="font-size:22px;font-weight:700" id="u-price">$—</div>
-    </div>
-
-    <button class="btn btn-p" id="req-trip-btn" onclick="requestTrip()" style="padding:14px">Solicitar mototaxi 🏍️</button>
-    <button class="btn btn-g" style="margin-top:8px;padding:11px" onclick="resetUserTrip()">Cancelar</button>
   </div>
 
   <!-- Panel buscando -->
