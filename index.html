@@ -845,7 +845,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'DM Sans
 .map-name-chip{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:8px 14px;font-size:14px;font-weight:600;backdrop-filter:blur(10px)}
 .logout-btn{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--txt2);cursor:pointer;font-family:inherit;backdrop-filter:blur(10px)}
 
-.bottom-sheet{background:var(--bg2);border-radius:22px 22px 0 0;border-top:1px solid var(--border);padding:18px 18px 28px;z-index:10;animation:slideUp .25s ease}
+.bottom-sheet{background:var(--bg2);border-radius:22px 22px 0 0;border-top:1px solid var(--border);padding:18px 18px 28px;z-index:10;animation:slideUp .25s ease;max-height:70vh;overflow-y:auto}
 .handle{width:32px;height:4px;background:var(--bg5);border-radius:2px;margin:0 auto 14px}
 .route-display{background:var(--bg3);border-radius:13px;padding:12px 14px;margin-bottom:12px}
 .route-row{display:flex;align-items:flex-start;gap:10px;padding:4px 0}
@@ -1038,47 +1038,38 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'DM Sans
   </div>
 
   <!-- Panel confirmación -->
-  <div id="u-panel-confirm" class="u-panel bottom-sheet" style="display:none">
+  <div id="u-panel-confirm" class="u-panel" style="display:none;position:absolute;bottom:0;left:0;right:0;background:var(--bg2);border-radius:22px 22px 0 0;border-top:1px solid var(--border);padding:14px 16px 24px;z-index:10;animation:slideUp .25s ease">
     <div class="handle"></div>
-    <div class="route-display" style="margin-bottom:10px">
-      <div class="route-row">
-        <div class="dot-o"></div>
-        <div class="route-addr" id="u-origin-txt2">Origen</div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div style="flex:1">
+        <div style="font-size:11px;color:var(--txt3)">De → A</div>
+        <div style="font-size:12px;color:var(--txt2)" id="u-origin-txt2">Origen</div>
       </div>
-      <div style="width:1px;height:10px;background:var(--border);margin-left:3px"></div>
-      <div class="route-row">
-        <div class="dot-d"></div>
-        <div class="route-addr" id="u-dest-txt2">Destino</div>
+      <div style="font-size:20px;color:var(--txt3)">→</div>
+      <div style="flex:1;text-align:right">
+        <div style="font-size:11px;color:var(--txt3)">Destino</div>
+        <div style="font-size:12px;color:var(--txt2)" id="u-dest-txt2">Destino</div>
       </div>
     </div>
 
-    <div class="type-row">
-      <button class="type-btn active" onclick="setTripType('exclusive',this)">🔒 Exclusivo</button>
-      <button class="type-btn" onclick="setTripType('shared',this)">👥 Compartido</button>
-    </div>
-
-    <div class="pax-row">
-      <span class="pax-lbl">👤 Pasajeros</span>
-      <div class="pax-ctrl">
-        <button class="pax-btn" onclick="setPax(-1)">−</button>
-        <span class="pax-n" id="u-pax">1</span>
-        <button class="pax-btn" onclick="setPax(1)">+</button>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;align-items:center">
+      <button class="type-btn active" onclick="setTripType('exclusive',this)" style="padding:10px 6px;font-size:12px">🔒 Exclusivo</button>
+      <button class="type-btn" onclick="setTripType('shared',this)" style="padding:10px 6px;font-size:12px">👥 Compartido</button>
+      <div style="display:flex;align-items:center;justify-content:center;gap:8px;background:var(--bg3);border-radius:11px;padding:10px 6px">
+        <button class="pax-btn" onclick="setPax(-1)" style="width:24px;height:24px;font-size:16px">−</button>
+        <span class="pax-n" id="u-pax" style="font-size:14px">1</span>
+        <button class="pax-btn" onclick="setPax(1)" style="width:24px;height:24px;font-size:16px">+</button>
       </div>
     </div>
 
-    <div class="price-row">
-      <div>
-        <div class="price-meta" id="u-dist">— km</div>
-        <div style="font-size:11px;color:var(--txt3)">Efectivo al conductor</div>
-      </div>
-      <div style="text-align:right">
-        <div style="font-size:11px;color:var(--txt2)">Total</div>
-        <div class="price-big" id="u-price">$—</div>
-      </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border-radius:12px;padding:10px 14px;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--txt2)"><span id="u-dist">—</span> · Efectivo</div>
+      <div style="font-size:22px;font-weight:700" id="u-price">$—</div>
     </div>
 
-    <button class="btn btn-p" id="req-trip-btn" onclick="requestTrip()">Solicitar mototaxi 🏍️</button>
-    <button class="btn btn-g" style="margin-top:8px" onclick="resetUserTrip()">Cancelar</button>
+    <button class="btn btn-p" id="req-trip-btn" onclick="requestTrip()" style="padding:14px">Solicitar mototaxi 🏍️</button>
+    <button class="btn btn-g" style="margin-top:8px;padding:11px" onclick="resetUserTrip()">Cancelar</button>
   </div>
 
   <!-- Panel buscando -->
