@@ -259,7 +259,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:system-u
     </div>
     <div style="font-size:13px;font-weight:700;color:var(--green)" id="d-active-status">En camino al origen</div>
     <div style="font-size:12px;color:var(--txt2)" id="d-active-sub"></div>
-    <button class="btn btn-blue" id="d-action-btn" onclick="advanceTrip()" style="margin-top:4px">Llegué al origen</button>
+    <button class="btn btn-blue" id="d-action-btn" onclick="this.textContent='Procesando...';this.disabled=true;advanceTrip().finally(()=>{this.disabled=false})" style="margin-top:4px">Llegué al origen</button>
   </div>
   <div id="d-request" style="position:absolute;inset:0;background:rgba(0,0,0,.75);display:none;align-items:flex-end;z-index:30">
     <div class="d-req-inner">
@@ -680,9 +680,12 @@ function listenDriverTrip(id){
 }
 
 window.advanceTrip=async function(){
-  // Recuperar tripId si se perdió
-  if(!tripId) tripId = profile.activeTrip || localStorage.getItem('activeTripId')
-  if(!tripId){toast('❌ No hay viaje activo');return}
+  // Siempre leer el tripId directo de Firestore como fuente de verdad
+  if(!tripId){
+    const driverSnap = await getDoc(doc(db,'drivers',me.uid))
+    tripId = driverSnap.data()?.activeTrip || localStorage.getItem('activeTripId')
+  }
+  if(!tripId){toast('❌ No hay viaje activo. Recarga la página.');return}
   const snap=await getDoc(doc(db,'trips',tripId)),t=snap.data()
   if(!t){toast('❌ Viaje no encontrado');return}
   const next=t.status==='accepted'?'arrived':t.status==='arrived'?'in_progress':t.status==='in_progress'?'completed':null
