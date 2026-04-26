@@ -700,6 +700,29 @@ function showReq(id,trip){
     if(s<=0){clearInterval(cdTimer);rejectTrip()}
   },1000)
   toast('🔔 ¡Nueva solicitud de viaje!')
+  playNotificationSound()
+}
+
+function playNotificationSound(){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)()
+    
+    // Tres beeps tipo notificación
+    const beeps = [0, 0.15, 0.30]
+    beeps.forEach((delay, i) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.frequency.value = i === 2 ? 880 : 660  // último beep más alto
+      osc.type = 'sine'
+      gain.gain.setValueAtTime(0, ctx.currentTime + delay)
+      gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + delay + 0.01)
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + delay + 0.12)
+      osc.start(ctx.currentTime + delay)
+      osc.stop(ctx.currentTime + delay + 0.15)
+    })
+  }catch(e){ console.log('Audio no disponible') }
 }
 
 window.acceptTrip=async function(){
