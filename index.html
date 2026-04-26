@@ -233,22 +233,24 @@ function initUserMap() {
       map.setView([19.2934, -99.0085], 15)
     }
 
-    // Click en mapa para seleccionar destino
+    // Click en mapa para seleccionar puntos
     map.on('click', async (e) => {
+      const lat = e.latlng.lat, lng = e.latlng.lng
       if (!selectedOrigin) {
-        selectedOrigin = { lat: e.latlng.lat, lng: e.latlng.lng, address: 'Origen seleccionado' }
-        document.getElementById('u-origin-txt').textContent = 'Origen seleccionado'
-        L.circleMarker([e.latlng.lat, e.latlng.lng], {
-          radius: 8, fillColor: '#fff', fillOpacity: 1, color: '#1a6fff', weight: 3
-        }).addTo(map)
-        toast('📍 Origen marcado. Ahora toca el destino')
+        selectedOrigin = { lat, lng, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}` }
+        const inp = document.getElementById('u-origin-input')
+        if (inp) inp.value = selectedOrigin.address
+        L.circleMarker([lat, lng], {
+          radius: 9, fillColor: '#fff', fillOpacity: 1, color: '#1a6fff', weight: 3
+        }).addTo(map).bindPopup('📍 Origen').openPopup()
+        toast('✅ Origen marcado. Ahora toca el destino en el mapa')
       } else if (!selectedDest) {
-        selectedDest = { lat: e.latlng.lat, lng: e.latlng.lng, address: 'Destino seleccionado' }
-        document.getElementById('u-dest-txt').textContent = 'Destino seleccionado'
-        L.circleMarker([e.latlng.lat, e.latlng.lng], {
-          radius: 8, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
-        }).addTo(map)
-        // Dibujar línea
+        selectedDest = { lat, lng, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}` }
+        const inp = document.getElementById('u-dest-input')
+        if (inp) inp.value = selectedDest.address
+        L.circleMarker([lat, lng], {
+          radius: 9, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
+        }).addTo(map).bindPopup('🏁 Destino').openPopup()
         if (routeLine) map.removeLayer(routeLine)
         routeLine = L.polyline([
           [selectedOrigin.lat, selectedOrigin.lng],
@@ -268,6 +270,69 @@ function showUserPanel(phase) {
   document.querySelectorAll('.u-panel').forEach(p => p.style.display = 'none')
   const el = document.getElementById('u-panel-' + phase)
   if (el) el.style.display = 'flex'
+}
+
+
+window.useMyLocation = async function() {
+  if (!navigator.geolocation) { toast('❌ GPS no disponible'); return }
+  toast('📍 Obteniendo ubicación...')
+  navigator.geolocation.getCurrentPosition(pos => {
+    const lat = pos.coords.latitude, lng = pos.coords.longitude
+    selectedOrigin = { lat, lng, address: 'Mi ubicación actual' }
+    const inp = document.getElementById('u-origin-input')
+    if (inp) inp.value = 'Mi ubicación actual'
+    if (map) {
+      map.setView([lat, lng], 16)
+      L.circleMarker([lat, lng], {
+        radius: 9, fillColor: '#fff', fillOpacity: 1, color: '#1a6fff', weight: 3
+      }).addTo(map).bindPopup('📍 Tú estás aquí').openPopup()
+    }
+    toast('✅ Origen: tu ubicación. Ahora toca el mapa para el destino')
+  }, () => toast('❌ No se pudo obtener ubicación'), { timeout: 8000 })
+}
+
+window.searchRoute = function() {
+  const originVal = document.getElementById('u-origin-input')?.value?.trim()
+  const destVal   = document.getElementById('u-dest-input')?.value?.trim()
+
+  if (!originVal) { toast('⚠️ Escribe el origen'); return }
+  if (!destVal)   { toast('⚠️ Escribe el destino'); return }
+
+  // Si ya tenemos origen por GPS, solo necesitamos destino
+  if (!selectedOrigin) {
+    // Usar coordenadas ficticias de Tláhuac como fallback para demo
+    selectedOrigin = { lat: 19.2900 + Math.random()*0.01, lng: -99.0100 + Math.random()*0.01, address: originVal }
+  }
+
+  selectedDest = { lat: selectedOrigin.lat + (Math.random()-0.5)*0.02, lng: selectedOrigin.lng + (Math.random()-0.5)*0.02, address: destVal }
+
+  if (map) {
+    map.eachLayer(l => { if (l instanceof L.CircleMarker) map.removeLayer(l) })
+    L.circleMarker([selectedOrigin.lat, selectedOrigin.lng], {
+      radius: 9, fillColor: '#fff', fillOpacity: 1, color: '#1a6fff', weight: 3
+    }).addTo(map).bindPopup('📍 ' + originVal).openPopup()
+    L.circleMarker([selectedDest.lat, selectedDest.lng], {
+      radius: 9, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
+    }).addTo(map).bindPopup('🏁 ' + destVal)
+
+    if (routeLine) map.removeLayer(routeLine)
+    routeLine = L.polyline([
+      [selectedOrigin.lat, selectedOrigin.lng],
+      [selectedDest.lat, selectedDest.lng]
+    ], { color: '#1a6fff', weight: 4, opacity: .8, dashArray: '8,4' }).addTo(map)
+
+    const bounds = L.latLngBounds([
+      [selectedOrigin.lat, selectedOrigin.lng],
+      [selectedDest.lat, selectedDest.lng]
+    ])
+    map.fitBounds(bounds, { padding: [60, 60] })
+  }
+
+  const dist = haversineKm(selectedOrigin.lat, selectedOrigin.lng, selectedDest.lat, selectedDest.lng) * 1000
+  const price = calcPrice(Math.max(dist, 500), passengers)
+  document.getElementById('u-price').textContent = '$' + price
+  document.getElementById('u-dist').textContent = (Math.max(dist,500)/1000).toFixed(1) + ' km'
+  showUserPanel('confirm')
 }
 
 window.resetUserTrip = function() {
@@ -957,18 +1022,19 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'DM Sans
   <div id="u-panel-idle" class="u-panel bottom-sheet">
     <div class="handle"></div>
     <div style="font-size:16px;font-weight:700;margin-bottom:12px">¿A dónde vas?</div>
-    <div class="route-display">
-      <div class="route-row">
-        <div class="dot-o"></div>
-        <div class="route-addr" id="u-origin-txt">Toca para seleccionar</div>
-      </div>
-      <div style="width:1px;height:10px;background:var(--border);margin-left:3px"></div>
-      <div class="route-row">
-        <div class="dot-d"></div>
-        <div class="route-addr" id="u-dest-txt">Toca el mapa para marcar</div>
+    <div style="margin-bottom:10px">
+      <div class="lbl">Origen</div>
+      <div style="display:flex;gap:8px">
+        <input class="inp" id="u-origin-input" placeholder="Escribe o usa tu ubicación..." style="flex:1;padding:12px 14px;font-size:13px"/>
+        <button onclick="useMyLocation()" style="background:var(--brand);border:none;border-radius:11px;padding:0 14px;color:#fff;font-size:18px;cursor:pointer;flex-shrink:0" title="Mi ubicación">📍</button>
       </div>
     </div>
-    <p style="font-size:12px;color:var(--txt3);text-align:center">👆 Toca el mapa para marcar origen y destino</p>
+    <div style="margin-bottom:14px">
+      <div class="lbl">Destino</div>
+      <input class="inp" id="u-dest-input" placeholder="¿A dónde vas?" style="padding:12px 14px;font-size:13px"/>
+    </div>
+    <button class="btn btn-p" onclick="searchRoute()" id="search-route-btn">Buscar ruta 🗺️</button>
+    <p style="font-size:11px;color:var(--txt3);text-align:center;margin-top:8px">O toca el mapa: 1er toque = origen · 2do toque = destino</p>
   </div>
 
   <!-- Panel confirmación -->
