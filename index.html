@@ -251,7 +251,7 @@ function initUserMap() {
         L.circleMarker([lat, lng], {
           radius: 9, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
         }).addTo(map).bindPopup('🏁 Destino').openPopup()
-        await drawRealRoute(selectedOrigin, selectedDest)
+        drawRealRoute(selectedOrigin, selectedDest)
       }
     })
   }, 300)
@@ -306,7 +306,7 @@ window.searchRoute = function() {
       radius: 9, fillColor: '#1a6fff', fillOpacity: 1, color: '#fff', weight: 3
     }).addTo(map).bindPopup('🏁 ' + destVal)
 
-    await drawRealRoute(selectedOrigin, selectedDest)
+    drawRealRoute(selectedOrigin, selectedDest)
 }
 
 
@@ -1252,16 +1252,9 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'DM Sans
 <div id="toast"></div>
 
 <script>
-// Sync confirm panel addresses
-const obs = new MutationObserver(() => {
-  const o2 = document.getElementById('u-origin-txt2')
-  const d2 = document.getElementById('u-dest-txt2')
-  if (o2) o2.textContent = document.getElementById('u-origin-txt').textContent
-  if (d2) d2.textContent = document.getElementById('u-dest-txt').textContent
-})
-obs.observe(document.getElementById('u-origin-txt'), { childList: true, characterData: true, subtree: true })
+// removed observer - no longer needed
 
-async function cancelTripUser() {
+async async function cancelTripUser() {
   if (currentTripId) {
     try {
       await updateDoc(doc(db, 'trips', currentTripId), {
