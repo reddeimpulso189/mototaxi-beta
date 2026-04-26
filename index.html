@@ -580,7 +580,18 @@ function initDriver(){
       myMarker=L.marker([p.coords.latitude,p.coords.longitude],{icon:L.divIcon({html:'<div style="font-size:26px">🏍️</div>',iconSize:[30,30],className:''})}).addTo(map)
     },()=>{})
   },300)
-  if(profile.activeTrip){tripId=profile.activeTrip;listenDriverTrip(profile.activeTrip);G('d-active').style.display='flex';G('d-idle').style.display='none'}
+  const savedTrip = profile.activeTrip || localStorage.getItem('activeTripId')
+  if(savedTrip){tripId=savedTrip;profile.activeTrip=savedTrip;listenDriverTrip(savedTrip);G('d-active').style.display='flex';G('d-idle').style.display='none';
+    // Restore step from Firestore
+    getDoc(doc(db,'trips',savedTrip)).then(s=>{
+      if(s.exists()){
+        const st=s.data().status
+        tripStep=st==='accepted'?0:st==='arrived'?1:st==='in_progress'?2:0
+        updateStep()
+        G('d-active-sub').textContent=st==='accepted'?'📍 Ve al origen':st==='arrived'?'Esperando pasajero':'🏁 Ve al destino'
+      }
+    }).catch(()=>{})
+  }
 }
 
 window.toggleOnline=async function(){
@@ -643,6 +654,7 @@ window.acceptTrip=async function(){
     await updateDoc(doc(db,'trips',reqId),{driverId:me.uid,driverName:profile.name,status:'accepted',acceptedAt:serverTimestamp()})
     await updateDoc(doc(db,'drivers',me.uid),{activeTrip:reqId})
     profile.activeTrip=reqId;tripId=reqId
+    localStorage.setItem('activeTripId',reqId)
     toast('✅ ¡Viaje aceptado!')
     if(availUnsub){availUnsub();availUnsub=null}
     G('d-active').style.display='flex'
@@ -668,14 +680,18 @@ function listenDriverTrip(id){
 }
 
 window.advanceTrip=async function(){
-  if(!tripId)return
+  // Recuperar tripId si se perdió
+  if(!tripId) tripId = profile.activeTrip || localStorage.getItem('activeTripId')
+  if(!tripId){toast('❌ No hay viaje activo');return}
   const snap=await getDoc(doc(db,'trips',tripId)),t=snap.data()
+  if(!t){toast('❌ Viaje no encontrado');return}
   const next=t.status==='accepted'?'arrived':t.status==='arrived'?'in_progress':t.status==='in_progress'?'completed':null
   if(!next)return
   await updateDoc(doc(db,'trips',tripId),{status:next,...(next==='completed'?{completedAt:serverTimestamp()}:{})})
   if(next==='completed'){
     await updateDoc(doc(db,'drivers',me.uid),{activeTrip:null,currentPassengers:0})
     profile.activeTrip=null;tripId=null
+    localStorage.removeItem('activeTripId')
     G('d-active').style.display='none';G('d-idle').style.display='flex'
     toast('🎉 ¡Viaje completado! $'+t.price+' MXN')
     if(tripUnsub){tripUnsub();tripUnsub=null}
