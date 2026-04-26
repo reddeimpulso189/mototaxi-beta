@@ -140,7 +140,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:system-u
 </div>
 
 <div id="user-map" class="screen" style="position:relative;flex-direction:column">
-  <div id="map-div" style="height:55vh;flex-shrink:0"></div>
+  <div id="map-div" style="height:60vh;flex-shrink:0"></div>
   <div class="topbar">
     <div class="chip">👋 <span id="u-name">Usuario</span></div>
     <button class="out-btn" onclick="logout()">Salir</button>
@@ -611,7 +611,7 @@ function startWatch(){
 
 function listenAvail(){
   if(availUnsub)availUnsub()
-  availUnsub=onSnapshot(query(collection(db,'trips'),where('status','==','searching'),orderBy('createdAt','desc'),limit(10)),snap=>{
+  availUnsub=onSnapshot(query(collection(db,'trips'),where('status','==','searching'),limit(10)),snap=>{
     if(!driverOnline||profile.activeTrip||G('d-request').style.display==='flex')return
     for(const d of snap.docs){
       const t=d.data()
