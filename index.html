@@ -693,14 +693,16 @@ function showReq(id,trip){
   G('d-cd').textContent=s
   G('d-cd').style.background='var(--brand)'
   clearInterval(cdTimer)
+  // Sonido inmediato y luego cada 3 segundos
+  playNotificationSound()
   cdTimer=setInterval(()=>{
     s--
     G('d-cd').textContent=s
     if(s<=5) G('d-cd').style.background='var(--red)'
+    if(s%3===0 && s>0) playNotificationSound() // sonido cada 3 segundos
     if(s<=0){clearInterval(cdTimer);rejectTrip()}
   },1000)
   toast('🔔 ¡Nueva solicitud de viaje!')
-  playNotificationSound()
 }
 
 function playNotificationSound(){
